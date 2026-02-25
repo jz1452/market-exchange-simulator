@@ -1,0 +1,15 @@
+# CMake Build Directory
+Trading\ Simulator/build/
+
+# IDE and Cache Directories
+Trading\ Simulator/.cache/
+.vscode/
+.DS_Store
+
+# Build artifacts and compilation databases
+Trading\ Simulator/compile_commands.json
+*.o
+*.out
+*.dylib
+*.so
+*.a
