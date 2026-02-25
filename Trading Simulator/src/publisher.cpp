@@ -97,30 +97,50 @@ int main() {
 
             double published_price = current_prices[sym_idx];
 
-            // Simulate a "Fundament Crash" 0.2% of the time
-            static std::uniform_int_distribution<int> fundamental_dist(1, 500);
-            if (fundamental_dist(rng) == 1) {
-              // A massive price collapse that we write back to current_prices
-              // Simulates company having permanent damage to its stock prices
-              // Drops the stock by 4% to 7% of its current value
-              static std::uniform_real_distribution<double> fundamental_depth(
-                  0.04, 0.07);
+            // Simulate a "Fundamental Drop" (Bad earnings, scandal) - 0.2%
+            // chance
+            static std::uniform_int_distribution<int> fund_drop_dist(1, 500);
+            // Simulate a "Fundamental Spike" (Acquisition, breakthrough) - 0.1%
+            // chance
+            static std::uniform_int_distribution<int> fund_spike_dist(1, 1000);
+
+            if (fund_drop_dist(rng) == 1) {
+              // Permanent structural damage (Drops 4% to 7%)
+              static std::uniform_real_distribution<double> drop_depth(0.04,
+                                                                       0.07);
               current_prices[sym_idx] -=
-                  (current_prices[sym_idx] * fundamental_depth(rng));
+                  (current_prices[sym_idx] * drop_depth(rng));
               if (current_prices[sym_idx] < 1.0)
                 current_prices[sym_idx] = 1.0;
               published_price = current_prices[sym_idx];
+            } else if (fund_spike_dist(rng) == 1) {
+              // Permanent structural growth (Spikes 4% to 7%)
+              static std::uniform_real_distribution<double> spike_depth(0.04,
+                                                                        0.07);
+              current_prices[sym_idx] +=
+                  (current_prices[sym_idx] * spike_depth(rng));
+              published_price = current_prices[sym_idx];
             } else {
-              // Simulate a significant random price drop 1% of the time
-              static std::uniform_int_distribution<int> anomaly_dist(1, 100);
-              if (anomaly_dist(rng) == 1) {
-                // Momentary crash of 1.5% to 3.0% of its current value
-                static std::uniform_real_distribution<double> anomaly_depth(
+              // Simulate a "Flash Crash" (Panic selling) - 1.0% chance
+              static std::uniform_int_distribution<int> anomaly_drop_dist(1,
+                                                                          100);
+              // Simulate a "Flash Spike" (Fat finger buy, brief squeeze) - 0.5%
+              // chance
+              static std::uniform_int_distribution<int> anomaly_spike_dist(1,
+                                                                           200);
+
+              if (anomaly_drop_dist(rng) == 1) {
+                // Momentary crash of 1.5% to 3.0%
+                static std::uniform_real_distribution<double> a_drop_depth(
                     0.015, 0.030);
-                published_price -= (published_price * anomaly_depth(rng));
-                // dont write this back to current_prices array
-                // guarantees the price will rubber-band back to normal on
-                // the very next tick.
+                published_price -= (published_price * a_drop_depth(rng));
+                // dont write back to current_prices (rubber-bands next tick)
+              } else if (anomaly_spike_dist(rng) == 1) {
+                // Momentary spike of 1.5% to 3.0%
+                static std::uniform_real_distribution<double> a_spike_depth(
+                    0.015, 0.030);
+                published_price += (published_price * a_spike_depth(rng));
+                // dont write back to current_prices (rubber-bands next tick)
               }
             }
 
