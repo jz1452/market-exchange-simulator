@@ -97,11 +97,9 @@ int main() {
 
             double published_price = current_prices[sym_idx];
 
-            // Simulate a "Fundamental Drop" (Bad earnings, scandal) - 0.2%
-            // chance
+            // Simulate a "Drop" (Bad earnings, scandal)
             static std::uniform_int_distribution<int> fund_drop_dist(1, 500);
-            // Simulate a "Fundamental Spike" (Acquisition, breakthrough) - 0.1%
-            // chance
+            // Simulate a "Spike" (Acquisition, breakthrough)
             static std::uniform_int_distribution<int> fund_spike_dist(1, 1000);
 
             if (fund_drop_dist(rng) == 1) {
@@ -114,18 +112,17 @@ int main() {
                 current_prices[sym_idx] = 1.0;
               published_price = current_prices[sym_idx];
             } else if (fund_spike_dist(rng) == 1) {
-              // Permanent structural growth (Spikes 4% to 7%)
-              static std::uniform_real_distribution<double> spike_depth(0.04,
-                                                                        0.07);
+              // Permanent structural growth (Spikes 3% to 6%)
+              static std::uniform_real_distribution<double> spike_depth(0.03,
+                                                                        0.06);
               current_prices[sym_idx] +=
                   (current_prices[sym_idx] * spike_depth(rng));
               published_price = current_prices[sym_idx];
             } else {
-              // Simulate a "Flash Crash" (Panic selling) - 1.0% chance
+              // Simulate a "Flash Crash" - 1.0% chance
               static std::uniform_int_distribution<int> anomaly_drop_dist(1,
                                                                           100);
-              // Simulate a "Flash Spike" (Fat finger buy, brief squeeze) - 0.5%
-              // chance
+              // Simulate a "Flash Spike" - 0.5% chance
               static std::uniform_int_distribution<int> anomaly_spike_dist(1,
                                                                            200);
 
@@ -134,13 +131,11 @@ int main() {
                 static std::uniform_real_distribution<double> a_drop_depth(
                     0.015, 0.030);
                 published_price -= (published_price * a_drop_depth(rng));
-                // dont write back to current_prices (rubber-bands next tick)
               } else if (anomaly_spike_dist(rng) == 1) {
                 // Momentary spike of 1.5% to 3.0%
                 static std::uniform_real_distribution<double> a_spike_depth(
                     0.015, 0.030);
                 published_price += (published_price * a_spike_depth(rng));
-                // dont write back to current_prices (rubber-bands next tick)
               }
             }
 
@@ -151,14 +146,14 @@ int main() {
             tick.price = published_price;
             tick.quantity = 100 + (seq_num % 50);
 
-            // Record timestamp right before network send
+            // Record timestamp to compare with subscriber --> calculate latency
             tick.timestamp =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::high_resolution_clock::now()
                         .time_since_epoch())
                     .count();
 
-            // Push to our historical ring Buffer
+            // Push to ring Buffer
             ring_buffer.push(seq_num, tick);
 
             // Send over UDP (artificially drop 1 in 2000 packets)
