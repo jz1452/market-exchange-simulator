@@ -61,8 +61,8 @@ int main() {
             static std::uniform_int_distribution<int> drop_dist(1, 20000);
 
             // Random walk delta: prices move by up to 0.2% per tick
-            static std::uniform_real_distribution<double> price_delta_dist(
-                -0.002, 0.002);
+            static std::normal_distribution<double> price_delta_dist(0.0,
+                                                                     0.001);
 
             // Stock prices
             static std::vector<double> current_prices(50, 0.0);
