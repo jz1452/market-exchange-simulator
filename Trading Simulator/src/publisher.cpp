@@ -185,27 +185,33 @@ int main() {
             int flags = fcntl(client_fd, F_GETFL, 0);
             fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
 
-            std::cout << "[TCP] Accepted request for missing packet\n";
+            std::cout << "[TCP] Accepted TCP connection for missing packet recovery in batch\n";
 
             protocol::RetransmitRequest req;
-            ssize_t bytes_read =
-                recv(client_fd, &req, sizeof(req), MSG_WAITALL);
-            if (bytes_read == sizeof(protocol::RetransmitRequest)) {
-              std::cout << "[TCP] Client requested seq="
-                        << req.missed_sequence_num << "\n";
-
-              protocol::TickPacket recovery_tick;
-              if (ring_buffer.get(req.missed_sequence_num, recovery_tick)) {
-                send(client_fd, &recovery_tick, sizeof(recovery_tick), 0);
-                std::cout << "[TCP] Sent missing packet back to client\n";
+            int packets_recovered = 0;
+            
+            // Loop reading requests until the client closes the connection (bytes_read <= 0)
+            while (true) {
+              ssize_t bytes_read = recv(client_fd, &req, sizeof(req), MSG_WAITALL);
+              if (bytes_read == sizeof(protocol::RetransmitRequest)) {
+                protocol::TickPacket recovery_tick;
+                if (ring_buffer.get(req.missed_sequence_num, recovery_tick)) {
+                  send(client_fd, &recovery_tick, sizeof(recovery_tick), 0);
+                  packets_recovered++;
+                } else {
+                  std::cerr << "[TCP] Requested packet seq=" << req.missed_sequence_num << " no longer in ring buffer!\n";
+                  // To prevent the Subscriber from freezing while waiting for a response, 
+                  // we send an empty 'dead' tick back to explicitly signal failure.
+                  protocol::TickPacket dead_tick{};
+                  dead_tick.sequence_num = req.missed_sequence_num; 
+                  send(client_fd, &dead_tick, sizeof(dead_tick), 0);
+                }
               } else {
-                std::cerr
-                    << "[TCP] Requested packet no longer in ring buffer!\n";
+                break; // Client finished asking and closed the connection, or error
               }
-            } else {
-              std::cerr << "[TCP] Failed to read RetransmitRequest size. Read: "
-                        << bytes_read << "\n";
             }
+            
+            std::cout << "[TCP] Finished recovery batch. Retransmitted " << packets_recovered << " packets.\n";
             close(client_fd);
           }
         }

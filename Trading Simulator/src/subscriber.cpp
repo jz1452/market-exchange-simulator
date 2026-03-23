@@ -98,34 +98,42 @@ int main() {
           std::cout << "\n[!] GAP DETECTED! Expected " << expected_seq
                     << ", got " << tick.sequence_num << "\n";
 
-          // Recover missing packet via TCP
-          for (uint64_t missed_seq = expected_seq;
-               missed_seq < tick.sequence_num; ++missed_seq) {
-            try {
-              int tcp_sock =
-                  networking::connect_tcp_client(PUBLISHER_IP, TCP_PORT);
+          // Recover missing packet via TCP using ONE persistent connection
+          try {
+            int tcp_sock = networking::connect_tcp_client(PUBLISHER_IP, TCP_PORT);
+
+            for (uint64_t missed_seq = expected_seq;
+                 missed_seq < tick.sequence_num; ++missed_seq) {
 
               protocol::RetransmitRequest req{missed_seq};
               send(tcp_sock, &req, sizeof(req), 0);
 
               protocol::TickPacket recovered_tick;
+              // Use MSG_WAITALL to ensure strict 32-byte TCP packet reconstruction
               ssize_t bytes_recv =
-                  recv(tcp_sock, &recovered_tick, sizeof(recovered_tick), 0);
+                  recv(tcp_sock, &recovered_tick, sizeof(recovered_tick), MSG_WAITALL);
 
               if (bytes_recv == sizeof(protocol::TickPacket)) {
-                std::cout << "[TCP] Successfully RECOVERED seq="
-                          << recovered_tick.sequence_num
-                          << " price=" << recovered_tick.price << "\n";
+                if (recovered_tick.price > 0.0) {
+                  std::cout << "[TCP] Successfully RECOVERED seq="
+                            << recovered_tick.sequence_num
+                            << " price=" << recovered_tick.price << "\n";
+                } else {
+                   std::cerr << "[TCP] Failed to recover seq=" << missed_seq << " (Expired from Publisher's RingBuffer)\n";
+                }
               } else {
-                std::cerr << "[TCP] Failed to recover seq=" << missed_seq
+                std::cerr << "[TCP] Connection broken while recovering seq=" << missed_seq
                           << "\n";
+                break; // Exit the loop if the TCP pipe breaks halfway through
               }
-              close(tcp_sock);
-
-            } catch (const std::exception &e) {
-              std::cerr << "[TCP] Recovery connection failed: " << e.what()
-                        << "\n";
             }
+            
+            // Close the connection explicitly once the entire batch is completed
+            close(tcp_sock);
+
+          } catch (const std::exception &e) {
+            std::cerr << "[TCP] Recovery connection failed: " << e.what()
+                      << "\n";
           }
         }
 
