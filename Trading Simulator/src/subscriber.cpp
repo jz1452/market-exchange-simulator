@@ -22,6 +22,7 @@ struct SymbolState {
   std::vector<double> prices;
   int idx = 0;
   double sum = 0.0;
+  double sum_sq = 0.0;
   int position = 0; // 0 = flat, 1 = bought
   double entry_price = 0.0;
   double pnl = 0.0;
@@ -74,22 +75,31 @@ void execute_strategy(const protocol::TickPacket &tick) {
   if (state.prices.size() < SMA_PERIOD) {
     state.prices.push_back(tick.price);
     state.sum += tick.price;
+    state.sum_sq += (tick.price * tick.price);
   } else {
-    state.sum -= state.prices[state.idx];
+    double old_price = state.prices[state.idx];
+    state.sum -= old_price;
+    state.sum_sq -= (old_price * old_price);
+
     state.prices[state.idx] = tick.price;
     state.sum += tick.price;
+    state.sum_sq += (tick.price * tick.price);
+
     state.idx = (state.idx + 1) % SMA_PERIOD;
   }
 
   if (state.prices.size() == SMA_PERIOD) {
     double current_sma = state.sum / SMA_PERIOD;
 
-    // Calculate Standard Deviation (Bollinger Bands)
-    double variance = 0.0;
-    for (double p : state.prices) {
-      variance += (p - current_sma) * (p - current_sma);
+    // Variance Calculation leveraging the Ring Buffer
+    double variance = (state.sum_sq / SMA_PERIOD) - (current_sma * current_sma);
+
+    // floating-point subtraction can precisely drift into -0.000001,
+    // mathematically floor the variance to 0.0 so std::sqrt doesn't crash
+    if (variance < 0.0) {
+      variance = 0.0;
     }
-    variance /= SMA_PERIOD;
+
     double std_dev = std::sqrt(variance);
 
     // Round the standard deviation so it doesn't get ridiculously small
