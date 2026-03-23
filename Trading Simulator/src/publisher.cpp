@@ -103,8 +103,8 @@ int main() {
 
             if (fund_drop_dist(rng) == 1) {
               // Permanent structural damage (7 to 14 Sigma)
-              static std::uniform_real_distribution<double> drop_depth(0.07,
-                                                                       0.14);
+              static std::uniform_real_distribution<double> drop_depth(0.06,
+                                                                       0.09);
               current_prices[sym_idx] -=
                   (current_prices[sym_idx] * drop_depth(rng));
               if (current_prices[sym_idx] < 1.0)
@@ -112,8 +112,8 @@ int main() {
               published_price = current_prices[sym_idx];
             } else if (fund_spike_dist(rng) == 1) {
               // Permanent structural growth (7 to 14 Sigma)
-              static std::uniform_real_distribution<double> spike_depth(0.07,
-                                                                        0.14);
+              static std::uniform_real_distribution<double> spike_depth(0.06,
+                                                                        0.09);
               current_prices[sym_idx] +=
                   (current_prices[sym_idx] * spike_depth(rng));
               published_price = current_prices[sym_idx];
@@ -128,12 +128,12 @@ int main() {
               if (anomaly_drop_dist(rng) == 1) {
                 // Momentary Flash Crash (3 to 5 Sigma)
                 static std::uniform_real_distribution<double> a_drop_depth(
-                    0.03, 0.05);
+                    0.025, 0.05);
                 published_price -= (published_price * a_drop_depth(rng));
               } else if (anomaly_spike_dist(rng) == 1) {
                 // Momentary Flash Spike (3 to 5 Sigma)
                 static std::uniform_real_distribution<double> a_spike_depth(
-                    0.03, 0.05);
+                    0.025, 0.05);
                 published_price += (published_price * a_spike_depth(rng));
               }
             }
