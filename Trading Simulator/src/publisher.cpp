@@ -102,7 +102,7 @@ int main() {
             static std::uniform_int_distribution<int> fund_spike_dist(1, 1000);
 
             if (fund_drop_dist(rng) == 1) {
-              // Permanent structural damage (7 to 14 Sigma)
+              // Permanent structural damage (6 to 9 Sigma)
               static std::uniform_real_distribution<double> drop_depth(0.06,
                                                                        0.09);
               current_prices[sym_idx] -=
@@ -111,7 +111,7 @@ int main() {
                 current_prices[sym_idx] = 1.0;
               published_price = current_prices[sym_idx];
             } else if (fund_spike_dist(rng) == 1) {
-              // Permanent structural growth (7 to 14 Sigma)
+              // Permanent structural growth (6 to 9 Sigma)
               static std::uniform_real_distribution<double> spike_depth(0.06,
                                                                         0.09);
               current_prices[sym_idx] +=
