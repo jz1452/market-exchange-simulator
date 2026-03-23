@@ -61,8 +61,7 @@ int main() {
             static std::uniform_int_distribution<int> drop_dist(1, 20000);
 
             // Random walk delta: prices move by up to 0.2% per tick
-            static std::normal_distribution<double> price_delta_dist(0.0,
-                                                                     0.001);
+            static std::normal_distribution<double> price_delta_dist(0.0, 0.01);
 
             // Stock prices
             static std::vector<double> current_prices(50, 0.0);
@@ -103,18 +102,18 @@ int main() {
             static std::uniform_int_distribution<int> fund_spike_dist(1, 1000);
 
             if (fund_drop_dist(rng) == 1) {
-              // Permanent structural damage (Drops 4% to 7%)
-              static std::uniform_real_distribution<double> drop_depth(0.04,
-                                                                       0.07);
+              // Permanent structural damage (7 to 14 Sigma)
+              static std::uniform_real_distribution<double> drop_depth(0.07,
+                                                                       0.14);
               current_prices[sym_idx] -=
                   (current_prices[sym_idx] * drop_depth(rng));
               if (current_prices[sym_idx] < 1.0)
                 current_prices[sym_idx] = 1.0;
               published_price = current_prices[sym_idx];
             } else if (fund_spike_dist(rng) == 1) {
-              // Permanent structural growth (Spikes 3% to 6%)
-              static std::uniform_real_distribution<double> spike_depth(0.03,
-                                                                        0.06);
+              // Permanent structural growth (7 to 14 Sigma)
+              static std::uniform_real_distribution<double> spike_depth(0.07,
+                                                                        0.14);
               current_prices[sym_idx] +=
                   (current_prices[sym_idx] * spike_depth(rng));
               published_price = current_prices[sym_idx];
@@ -127,14 +126,14 @@ int main() {
                                                                            200);
 
               if (anomaly_drop_dist(rng) == 1) {
-                // Momentary crash of 1.5% to 3.0%
+                // Momentary Flash Crash (3 to 5 Sigma)
                 static std::uniform_real_distribution<double> a_drop_depth(
-                    0.015, 0.030);
+                    0.03, 0.05);
                 published_price -= (published_price * a_drop_depth(rng));
               } else if (anomaly_spike_dist(rng) == 1) {
-                // Momentary spike of 1.5% to 3.0%
+                // Momentary Flash Spike (3 to 5 Sigma)
                 static std::uniform_real_distribution<double> a_spike_depth(
-                    0.015, 0.030);
+                    0.03, 0.05);
                 published_price += (published_price * a_spike_depth(rng));
               }
             }
@@ -185,33 +184,41 @@ int main() {
             int flags = fcntl(client_fd, F_GETFL, 0);
             fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
 
-            std::cout << "[TCP] Accepted TCP connection for missing packet recovery in batch\n";
+            std::cout << "[TCP] Accepted TCP connection for missing packet "
+                         "recovery in batch\n";
 
             protocol::RetransmitRequest req;
             int packets_recovered = 0;
-            
-            // Loop reading requests until the client closes the connection (bytes_read <= 0)
+
+            // Loop reading requests until the client closes the connection
+            // (bytes_read <= 0)
             while (true) {
-              ssize_t bytes_read = recv(client_fd, &req, sizeof(req), MSG_WAITALL);
+              ssize_t bytes_read =
+                  recv(client_fd, &req, sizeof(req), MSG_WAITALL);
               if (bytes_read == sizeof(protocol::RetransmitRequest)) {
                 protocol::TickPacket recovery_tick;
                 if (ring_buffer.get(req.missed_sequence_num, recovery_tick)) {
                   send(client_fd, &recovery_tick, sizeof(recovery_tick), 0);
                   packets_recovered++;
                 } else {
-                  std::cerr << "[TCP] Requested packet seq=" << req.missed_sequence_num << " no longer in ring buffer!\n";
-                  // To prevent the Subscriber from freezing while waiting for a response, 
-                  // we send an empty 'dead' tick back to explicitly signal failure.
+                  std::cerr << "[TCP] Requested packet seq="
+                            << req.missed_sequence_num
+                            << " no longer in ring buffer!\n";
+                  // To prevent the Subscriber from freezing while waiting for a
+                  // response, we send an empty 'dead' tick back to explicitly
+                  // signal failure.
                   protocol::TickPacket dead_tick{};
-                  dead_tick.sequence_num = req.missed_sequence_num; 
+                  dead_tick.sequence_num = req.missed_sequence_num;
                   send(client_fd, &dead_tick, sizeof(dead_tick), 0);
                 }
               } else {
-                break; // Client finished asking and closed the connection, or error
+                break; // Client finished asking and closed the connection, or
+                       // error
               }
             }
-            
-            std::cout << "[TCP] Finished recovery batch. Retransmitted " << packets_recovered << " packets.\n";
+
+            std::cout << "[TCP] Finished recovery batch. Retransmitted "
+                      << packets_recovered << " packets.\n";
             close(client_fd);
           }
         }
