@@ -65,6 +65,89 @@ void signal_handler(int signum) {
   exit(signum);
 }
 
+void execute_strategy(const protocol::TickPacket &tick) {
+  // Trading strat: statistical arbitrage (mean reversion)
+  // Maintain the moving average for the stock
+  std::string sym(tick.symbol);
+  SymbolState &state = strategy_state[sym];
+
+  if (state.prices.size() < SMA_PERIOD) {
+    state.prices.push_back(tick.price);
+    state.sum += tick.price;
+  } else {
+    state.sum -= state.prices[state.idx];
+    state.prices[state.idx] = tick.price;
+    state.sum += tick.price;
+    state.idx = (state.idx + 1) % SMA_PERIOD;
+  }
+
+  if (state.prices.size() == SMA_PERIOD) {
+    double current_sma = state.sum / SMA_PERIOD;
+
+    // Calculate Standard Deviation (Bollinger Bands)
+    double variance = 0.0;
+    for (double p : state.prices) {
+      variance += (p - current_sma) * (p - current_sma);
+    }
+    variance /= SMA_PERIOD;
+    double std_dev = std::sqrt(variance);
+
+    // Round the standard deviation so it doesn't get ridiculously small
+    // in completely silent markets
+    if (std_dev < 0.10)
+      std_dev = 0.10;
+
+    // If we have no position, look for a dip below the Bollinger Band (-2
+    // Standard Deviations)
+    if (state.position == 0 && tick.price <= current_sma - (2.0 * std_dev)) {
+      state.position = 1;
+      state.entry_price = tick.price;
+      state.ticks_held = 0;
+      std::cout << "\033[1;32m[STRATEGY] BUY 100 " << sym << " @ $"
+                << tick.price << " (SMA: $" << current_sma << ", 2\u03c3: $"
+                << (2.0 * std_dev) << ")\033[0m\n";
+    }
+    // If we have stock, manage the open position
+    else if (state.position == 1) {
+      state.ticks_held++;
+
+      // Exit 1: take profit (mean reversion)
+      if (tick.price >= current_sma) {
+        double profit = (tick.price - state.entry_price) * 100.0;
+        state.pnl += profit;
+        total_session_pnl += profit;
+        state.position = 0;
+        state.trades++;
+        std::cout << "\033[1;36m[STRATEGY] SELL (TAKE PROFIT) 100 " << sym
+                  << " @ $" << tick.price << " (Profit: $" << profit
+                  << ")\033[0m\n";
+      }
+      // Exit 2: hard stop loss (The price just keeps plummeting)
+      else if (tick.price <= state.entry_price - (3.0 * std_dev) &&
+               state.ticks_held > 2) {
+        double loss = (tick.price - state.entry_price) * 100.0;
+        state.pnl += loss;
+        total_session_pnl += loss;
+        state.position = 0;
+        state.trades++;
+        std::cout << "\033[1;31m[STRATEGY] SELL (STOP LOSS) 100 " << sym
+                  << " @ $" << tick.price << " (Loss: $" << loss
+                  << ")\033[0m\n";
+      }
+      // Exit 3: time stop loss (stock is not rising back to mean)
+      else if (state.ticks_held > 50) {
+        double loss = (tick.price - state.entry_price) * 100.0;
+        state.pnl += loss;
+        total_session_pnl += loss;
+        state.position = 0;
+        state.trades++;
+        std::cout << "\033[1;33m[STRATEGY] SELL (TIME STOP) 100 " << sym
+                  << " @ $" << tick.price << " (PnL: $" << loss << ")\033[0m\n";
+      }
+    }
+  }
+}
+
 int main() {
   std::signal(SIGINT, signal_handler);
   std::cout << "Starting Trading Simulation Engine...\n";
@@ -100,7 +183,8 @@ int main() {
 
           // Recover missing packet via TCP using ONE persistent connection
           try {
-            int tcp_sock = networking::connect_tcp_client(PUBLISHER_IP, TCP_PORT);
+            int tcp_sock =
+                networking::connect_tcp_client(PUBLISHER_IP, TCP_PORT);
 
             for (uint64_t missed_seq = expected_seq;
                  missed_seq < tick.sequence_num; ++missed_seq) {
@@ -109,26 +193,32 @@ int main() {
               send(tcp_sock, &req, sizeof(req), 0);
 
               protocol::TickPacket recovered_tick;
-              // Use MSG_WAITALL to ensure strict 32-byte TCP packet reconstruction
-              ssize_t bytes_recv =
-                  recv(tcp_sock, &recovered_tick, sizeof(recovered_tick), MSG_WAITALL);
+              // Use MSG_WAITALL to ensure strict 32-byte TCP packet
+              // reconstruction
+              ssize_t bytes_recv = recv(tcp_sock, &recovered_tick,
+                                        sizeof(recovered_tick), MSG_WAITALL);
 
               if (bytes_recv == sizeof(protocol::TickPacket)) {
                 if (recovered_tick.price > 0.0) {
                   std::cout << "[TCP] Successfully RECOVERED seq="
                             << recovered_tick.sequence_num
                             << " price=" << recovered_tick.price << "\n";
+                  ticks_received_this_sec++;
+                  // Send the recovered packet directly into strategy engine
+                  execute_strategy(recovered_tick);
                 } else {
-                   std::cerr << "[TCP] Failed to recover seq=" << missed_seq << " (Expired from Publisher's RingBuffer)\n";
+                  std::cerr << "[TCP] Failed to recover seq=" << missed_seq
+                            << " (Expired from Publisher's RingBuffer)\n";
                 }
               } else {
-                std::cerr << "[TCP] Connection broken while recovering seq=" << missed_seq
-                          << "\n";
+                std::cerr << "[TCP] Connection broken while recovering seq="
+                          << missed_seq << "\n";
                 break; // Exit the loop if the TCP pipe breaks halfway through
               }
             }
-            
-            // Close the connection explicitly once the entire batch is completed
+
+            // Close the connection explicitly once the entire batch is
+            // completed
             close(tcp_sock);
 
           } catch (const std::exception &e) {
@@ -172,88 +262,8 @@ int main() {
         // next expected seq
         expected_seq = tick.sequence_num + 1;
 
-        // Trading strat: statistical arbitrage (mean reversion)
-        // Maintain the moving average for the stock
-        std::string sym(tick.symbol);
-        SymbolState &state = strategy_state[sym];
-
-        if (state.prices.size() < SMA_PERIOD) {
-          state.prices.push_back(tick.price);
-          state.sum += tick.price;
-        } else {
-          state.sum -= state.prices[state.idx];
-          state.prices[state.idx] = tick.price;
-          state.sum += tick.price;
-          state.idx = (state.idx + 1) % SMA_PERIOD;
-        }
-
-        if (state.prices.size() == SMA_PERIOD) {
-          double current_sma = state.sum / SMA_PERIOD;
-
-          // Calculate Standard Deviation (Bollinger Bands)
-          double variance = 0.0;
-          for (double p : state.prices) {
-            variance += (p - current_sma) * (p - current_sma);
-          }
-          variance /= SMA_PERIOD;
-          double std_dev = std::sqrt(variance);
-
-          // Round the standard deviation so it doesn't get ridiculously small
-          // in completely silent markets
-          if (std_dev < 0.10)
-            std_dev = 0.10;
-
-          // If we have no position, look for a dip below the Bollinger Band (-2
-          // Standard Deviations)
-          if (state.position == 0 &&
-              tick.price <= current_sma - (2.0 * std_dev)) {
-            state.position = 1;
-            state.entry_price = tick.price;
-            state.ticks_held = 0;
-            std::cout << "\033[1;32m[STRATEGY] BUY 100 " << sym << " @ $"
-                      << tick.price << " (SMA: $" << current_sma
-                      << ", 2\u03c3: $" << (2.0 * std_dev) << ")\033[0m\n";
-          }
-          // If we have stock, manage the open position
-          else if (state.position == 1) {
-            state.ticks_held++;
-
-            // Exit 1: take profit (mean reversion)
-            if (tick.price >= current_sma) {
-              double profit = (tick.price - state.entry_price) * 100.0;
-              state.pnl += profit;
-              total_session_pnl += profit;
-              state.position = 0;
-              state.trades++;
-              std::cout << "\033[1;36m[STRATEGY] SELL (TAKE PROFIT) 100 " << sym
-                        << " @ $" << tick.price << " (Profit: $" << profit
-                        << ")\033[0m\n";
-            }
-            // Exit 2: hard stop loss (The price just keeps plummeting)
-            else if (tick.price <= state.entry_price - (3.0 * std_dev) &&
-                     state.ticks_held > 2) {
-              double loss = (tick.price - state.entry_price) * 100.0;
-              state.pnl += loss;
-              total_session_pnl += loss;
-              state.position = 0;
-              state.trades++;
-              std::cout << "\033[1;31m[STRATEGY] SELL (STOP LOSS) 100 " << sym
-                        << " @ $" << tick.price << " (Loss: $" << loss
-                        << ")\033[0m\n";
-            }
-            // Exit 3: time stop loss (stock is not rising back to mean)
-            else if (state.ticks_held > 50) {
-              double loss = (tick.price - state.entry_price) * 100.0;
-              state.pnl += loss;
-              total_session_pnl += loss;
-              state.position = 0;
-              state.trades++;
-              std::cout << "\033[1;33m[STRATEGY] SELL (TIME STOP) 100 " << sym
-                        << " @ $" << tick.price << " (PnL: $" << loss
-                        << ")\033[0m\n";
-            }
-          }
-        }
+        // Send the original UDP packet into our strategy engine
+        execute_strategy(tick);
 
       } else if (received < 0) {
         std::cerr << "UDP Receive failed\n";
