@@ -1,5 +1,6 @@
 #include "networking.hpp"
 #include "protocol.hpp"
+#include "spsc_queue.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <csignal>
 #include <iostream>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +30,7 @@ struct SymbolState {
   double pnl = 0.0;
   int trades = 0;
   int ticks_held = 0;
+  int total_ticks_processed = 0;
 };
 
 std::atomic<bool> keep_running{true};
@@ -89,20 +92,34 @@ void execute_strategy(const protocol::TickPacket &tick) {
   }
 
   if (state.prices.size() == SMA_PERIOD) {
+    state.total_ticks_processed++;
+
+    // recalculates sums and sum sq manually to wipe out floating-point drift
+    // every once in a while
+    if (state.total_ticks_processed % 1000 == 0) {
+      double true_sum = 0.0;
+      double true_sum_sq = 0.0;
+      for (double p : state.prices) {
+        true_sum += p;
+        true_sum_sq += (p * p);
+      }
+      state.sum = true_sum;
+      state.sum_sq = true_sum_sq;
+    }
+
     double current_sma = state.sum / SMA_PERIOD;
 
     // Variance Calculation leveraging the Ring Buffer
     double variance = (state.sum_sq / SMA_PERIOD) - (current_sma * current_sma);
 
     // floating-point subtraction can precisely drift into -0.000001,
-    // mathematically floor the variance to 0.0 so std::sqrt doesn't crash
     if (variance < 0.0) {
       variance = 0.0;
     }
 
     double std_dev = std::sqrt(variance);
 
-    // Round the standard deviation so it doesn't get ridiculously small
+    // Round the standard deviation so it doesn't get too small
     // in completely silent markets
     if (std_dev < 0.10)
       std_dev = 0.10;
@@ -158,6 +175,39 @@ void execute_strategy(const protocol::TickPacket &tick) {
   }
 }
 
+SPSCQueue<10000> event_queue;
+
+void network_thread_func(int udp_sock) {
+  std::cout << "[THREAD] Network thread initialised.\n";
+  while (keep_running) {
+
+    // Claim memory from the pre-allocated Ring Buffer
+    protocol::TickPacket *raw_slot = nullptr;
+    while (!(raw_slot = event_queue.claim_write()) && keep_running) {
+      // Spin-wait (Backpressure prevents the app from proceeding until space
+      // clears)
+    }
+    if (!keep_running)
+      break;
+
+    sockaddr_in sender_addr{};
+    socklen_t sender_len = sizeof(sender_addr);
+
+    // Directly input Ticks into ring buffer
+    ssize_t received =
+        recvfrom(udp_sock, raw_slot, sizeof(protocol::TickPacket), 0,
+                 (struct sockaddr *)&sender_addr, &sender_len);
+
+    if (received == sizeof(protocol::TickPacket)) {
+      // Publish data to the Strategy Engine
+      event_queue.commit_write();
+    } else if (received < 0) {
+      std::cerr << "UDP Receive failed occasionally due to loop disconnect\n";
+      break;
+    }
+  }
+}
+
 int main() {
   std::signal(SIGINT, signal_handler);
   std::cout << "Starting Trading Simulation Engine...\n";
@@ -176,20 +226,18 @@ int main() {
     auto last_report_time = std::chrono::steady_clock::now();
     protocol::TickPacket last_recv_tick{};
 
+    std::thread net_thread(network_thread_func, udp_sock);
+    std::cout << "[THREAD] Quantitative Strategy Engine initialised.\n";
+
     while (keep_running) {
-      protocol::TickPacket tick;
-      sockaddr_in sender_addr{};
-      socklen_t sender_len = sizeof(sender_addr);
+      // Strategy Thread: Request a read-only pointer to the Ring Buffer slot
+      const protocol::TickPacket *tick_ptr = event_queue.front();
 
-      ssize_t received =
-          recvfrom(udp_sock, &tick, sizeof(protocol::TickPacket), 0,
-                   (struct sockaddr *)&sender_addr, &sender_len);
+      if (tick_ptr) {
 
-      if (received == sizeof(protocol::TickPacket)) {
-
-        if (expected_seq != 0 && tick.sequence_num > expected_seq) {
+        if (expected_seq != 0 && tick_ptr->sequence_num > expected_seq) {
           std::cout << "\n[!] GAP DETECTED! Expected " << expected_seq
-                    << ", got " << tick.sequence_num << "\n";
+                    << ", got " << tick_ptr->sequence_num << "\n";
 
           // Recover missing packet via TCP using ONE persistent connection
           try {
@@ -197,7 +245,7 @@ int main() {
                 networking::connect_tcp_client(PUBLISHER_IP, TCP_PORT);
 
             for (uint64_t missed_seq = expected_seq;
-                 missed_seq < tick.sequence_num; ++missed_seq) {
+                 missed_seq < tick_ptr->sequence_num; ++missed_seq) {
 
               protocol::RetransmitRequest req{missed_seq};
               send(tcp_sock, &req, sizeof(req), 0);
@@ -241,7 +289,7 @@ int main() {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::high_resolution_clock::now().time_since_epoch())
                 .count();
-        double latency_us = (now_ns - tick.timestamp) / 1000.0;
+        double latency_us = (now_ns - tick_ptr->timestamp) / 1000.0;
 
         ticks_received_this_sec++;
         if (latency_us < min_lat)
@@ -249,7 +297,7 @@ int main() {
         if (latency_us > max_lat)
           max_lat = latency_us;
         sum_lat += latency_us;
-        last_recv_tick = tick;
+        last_recv_tick = *tick_ptr;
 
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now -
@@ -270,16 +318,19 @@ int main() {
         }
 
         // next expected seq
-        expected_seq = tick.sequence_num + 1;
+        expected_seq = tick_ptr->sequence_num + 1;
 
         // Send the original UDP packet into our strategy engine
-        execute_strategy(tick);
+        execute_strategy(*tick_ptr);
 
-      } else if (received < 0) {
-        std::cerr << "UDP Receive failed\n";
-        break;
+        // Formally release the Ring Buffer slot back to the
+        // Network Thread
+        event_queue.pop();
       }
     }
+
+    std::cout << "[MAIN] Loop broken, waiting for background threads...\n";
+    net_thread.join();
 
   } catch (const std::exception &e) {
     std::cerr << "Fatal Error: " << e.what() << "\n";
