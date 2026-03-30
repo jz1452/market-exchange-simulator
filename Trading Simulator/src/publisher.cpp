@@ -2,17 +2,81 @@
 #include "networking.hpp"
 #include "protocol.hpp"
 #include "ring_buffer.hpp"
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <random>
 #include <string>
+#include <thread>
 
 const std::string MULTICAST_IP = "224.0.0.1";
 const int MULTICAST_PORT = 30001;
 const int TCP_PORT = 40001;
-const size_t RING_BUFFER_SIZE = 10000;
+const size_t RING_BUFFER_SIZE = 50000;
+
+std::atomic<bool> keep_running{true};
+
+void signal_handler(int signum) {
+  std::cout << "\n[PUBLISHER] Shutting down...\n";
+  keep_running = false;
+  exit(signum);
+}
+
+// Dedicated TCP Recovery Thread: handles subscriber recovery requests
+// Uses blocking accept() so it never interferes with the UDP broadcast loop
+void tcp_recovery_thread_func(
+    int tcp_sock,
+    const core::RingBuffer<protocol::TickPacket, RING_BUFFER_SIZE>
+        &ring_buffer) {
+  std::cout << "[THREAD] TCP Recovery thread initialised.\n";
+
+  while (keep_running) {
+    struct sockaddr_in client_addr {};
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd =
+        accept(tcp_sock, (struct sockaddr *)&client_addr, &client_len);
+
+    if (client_fd >= 0) {
+      std::cout << "[TCP] Accepted TCP connection for missing packet "
+                   "recovery in batch\n";
+
+      protocol::RetransmitRequest req;
+      int packets_recovered = 0;
+
+      // Loop reading requests until the client closes the connection
+      while (true) {
+        ssize_t bytes_read = recv(client_fd, &req, sizeof(req), MSG_WAITALL);
+        if (bytes_read == sizeof(protocol::RetransmitRequest)) {
+          protocol::TickPacket recovery_tick;
+          if (ring_buffer.get(req.missed_sequence_num, recovery_tick)) {
+            send(client_fd, &recovery_tick, sizeof(recovery_tick), 0);
+            packets_recovered++;
+          } else {
+            std::cerr << "[TCP] Requested packet seq="
+                      << req.missed_sequence_num
+                      << " no longer in ring buffer!\n";
+            // Send an empty 'dead' tick back to signal failure
+            protocol::TickPacket dead_tick{};
+            dead_tick.sequence_num = req.missed_sequence_num;
+            send(client_fd, &dead_tick, sizeof(dead_tick), 0);
+          }
+        } else {
+          break; // Client finished or error
+        }
+      }
+
+      std::cout << "[TCP] Finished recovery batch. Retransmitted "
+                << packets_recovered << " packets.\n";
+      close(client_fd);
+    } else if (!keep_running) {
+      break;
+    }
+  }
+}
 
 int main() {
+  std::signal(SIGINT, signal_handler);
   std::cout << "Starting simple market data publisher...\n";
 
   try {
@@ -26,24 +90,27 @@ int main() {
     std::cout << "[TCP] Listening for recovery requests on port " << TCP_PORT
               << "\n";
 
+    // kqueue now exclusively handles timers (no TCP monitoring)
     networking::EventLoop loop;
     core::RingBuffer<protocol::TickPacket, RING_BUFFER_SIZE> ring_buffer;
 
-    networking::EventData tcp_listen_data{tcp_sock, false};
     networking::EventData market_tick_data{-1, true};
     networking::EventData metrics_timer_data{-2, true};
 
-    loop.register_read(tcp_sock, &tcp_listen_data);
     loop.register_timer(1, 1, &market_tick_data); // 1ms interval (1000 msgs/s)
     loop.register_timer(2, 1000,
                         &metrics_timer_data); // metrics report every second
+
+    // Spawn dedicated TCP recovery thread
+    std::thread tcp_thread(tcp_recovery_thread_func, tcp_sock,
+                           std::ref(ring_buffer));
 
     uint64_t seq_num = 1;
     uint64_t msgs_sent_this_sec = 0;
     protocol::TickPacket last_sent_tick{};
 
     std::cout << "Entering Event Loop...\n";
-    while (true) {
+    while (keep_running) {
       loop.poll([&](networking::EventData *data, bool is_eof) {
         (void)is_eof;
 
@@ -152,7 +219,7 @@ int main() {
                         .time_since_epoch())
                     .count();
 
-            // Push to ring Buffer
+            // Push to ring Buffer (SeqLock-protected)
             ring_buffer.push(seq_num, tick);
 
             // Send over UDP (artificially drop 1 in 2000 packets)
@@ -171,59 +238,12 @@ int main() {
             last_sent_tick = tick;
             seq_num++;
           }
-
-        } else if (!data->is_timer && data->fd == tcp_sock) {
-          struct sockaddr_in client_addr {};
-          socklen_t client_len = sizeof(client_addr);
-          int client_fd =
-              accept(tcp_sock, (struct sockaddr *)&client_addr, &client_len);
-
-          if (client_fd >= 0) {
-            // Ensure the client socket is completely blocking for this quick
-            // exchange
-            int flags = fcntl(client_fd, F_GETFL, 0);
-            fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
-
-            std::cout << "[TCP] Accepted TCP connection for missing packet "
-                         "recovery in batch\n";
-
-            protocol::RetransmitRequest req;
-            int packets_recovered = 0;
-
-            // Loop reading requests until the client closes the connection
-            // (bytes_read <= 0)
-            while (true) {
-              ssize_t bytes_read =
-                  recv(client_fd, &req, sizeof(req), MSG_WAITALL);
-              if (bytes_read == sizeof(protocol::RetransmitRequest)) {
-                protocol::TickPacket recovery_tick;
-                if (ring_buffer.get(req.missed_sequence_num, recovery_tick)) {
-                  send(client_fd, &recovery_tick, sizeof(recovery_tick), 0);
-                  packets_recovered++;
-                } else {
-                  std::cerr << "[TCP] Requested packet seq="
-                            << req.missed_sequence_num
-                            << " no longer in ring buffer!\n";
-                  // To prevent the Subscriber from freezing while waiting for a
-                  // response, we send an empty 'dead' tick back to explicitly
-                  // signal failure.
-                  protocol::TickPacket dead_tick{};
-                  dead_tick.sequence_num = req.missed_sequence_num;
-                  send(client_fd, &dead_tick, sizeof(dead_tick), 0);
-                }
-              } else {
-                break; // Client finished asking and closed the connection, or
-                       // error
-              }
-            }
-
-            std::cout << "[TCP] Finished recovery batch. Retransmitted "
-                      << packets_recovered << " packets.\n";
-            close(client_fd);
-          }
         }
       });
     }
+
+    tcp_thread.join();
+
   } catch (const std::exception &e) {
     std::cerr << "Fatal Error: " << e.what() << "\n";
     return 1;
@@ -231,3 +251,4 @@ int main() {
 
   return 0;
 }
+

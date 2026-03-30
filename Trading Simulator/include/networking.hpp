@@ -1,7 +1,6 @@
 #pragma once
 
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
 #include <stdexcept>
@@ -10,15 +9,6 @@
 #include <unistd.h>
 
 namespace networking {
-
-inline void set_non_blocking(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags == -1)
-    throw std::runtime_error("fcntl F_GETFL failed");
-  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-    throw std::runtime_error("fcntl F_SETFL nonblock failed");
-  }
-}
 
 // UDP Multicast Functions
 
@@ -108,8 +98,6 @@ inline int create_tcp_listener(int port) {
     close(sock);
     throw std::runtime_error("Failed to listen on TCP socket");
   }
-
-  set_non_blocking(sock);
 
   return sock;
 }
