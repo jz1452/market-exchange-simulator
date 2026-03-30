@@ -23,12 +23,10 @@ void signal_handler(int signum) {
   exit(signum);
 }
 
-// Dedicated TCP Recovery Thread: handles subscriber recovery requests
-// Uses blocking accept() so it never interferes with the UDP broadcast loop
+// Blocking TCP Recovery Thread: handles subscriber recovery requests
 void tcp_recovery_thread_func(
-    int tcp_sock,
-    const core::RingBuffer<protocol::TickPacket, RING_BUFFER_SIZE>
-        &ring_buffer) {
+    int tcp_sock, const core::RingBuffer<protocol::TickPacket, RING_BUFFER_SIZE>
+                      &ring_buffer) {
   std::cout << "[THREAD] TCP Recovery thread initialised.\n";
 
   while (keep_running) {
@@ -90,7 +88,7 @@ int main() {
     std::cout << "[TCP] Listening for recovery requests on port " << TCP_PORT
               << "\n";
 
-    // kqueue now exclusively handles timers (no TCP monitoring)
+    // kqueue handles timers
     networking::EventLoop loop;
     core::RingBuffer<protocol::TickPacket, RING_BUFFER_SIZE> ring_buffer;
 
@@ -251,4 +249,3 @@ int main() {
 
   return 0;
 }
-
